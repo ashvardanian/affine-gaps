@@ -279,7 +279,7 @@ def needleman_wunsch_gotoh_score_kernel(
     return previous_score_row[-1]
 
 
-def needleman_wunsch_gotoh(
+def needleman_wunsch_gotoh_score(
     str1: str,
     str2: str,
     substitution_alphabet: str = default_substitution_alphabet,
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     str1 = "GIVEQCCTSICSLYQLENYCN"  # insulin
     str2 = "HSQGTFTSDYSKYLDSRAEQDFV"  # glucagon
     align1, align2, aligned_score = needleman_wunsch_gotoh_alignment(str1, str2)
-    score = needleman_wunsch_gotoh(str1, str2)
+    score = needleman_wunsch_gotoh_score(str1, str2)
     print("Alignment 1:", align1)
     print("Alignment 2:", align2)
     print("Score:", aligned_score, score)
