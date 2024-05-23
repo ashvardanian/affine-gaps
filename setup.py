@@ -10,7 +10,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/ashvardanian/affine-gaps",
     py_modules=["affine_gaps"],
-    install_requires=["numba", "numpy"],
+    install_requires=["numba", "numpy", "colorama"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",

@@ -2,9 +2,13 @@ from typing import Tuple, Optional
 
 import numpy as np
 import numba as nb
+from colorama import Fore, Style
+from colorama import init as _colorama_init
 
 _int32_max = np.iinfo(np.int32).max
 _int32_min = np.iinfo(np.int32).min
+
+_colorama_init(autoreset=True)
 
 
 # By default, we use BLOSUM62 with affine gap penalties
@@ -356,6 +360,34 @@ def needleman_wunsch_gotoh_score(
     return int(score)
 
 
+def colorize_alignment(align1: str, align2: str) -> Tuple[str, str]:
+    """
+    Colorizes the alignment strings for visual distinction between matches, mismatches, and gaps.
+
+    Parameters:
+    align1 (str): The first aligned sequence.
+    align2 (str): The second aligned sequence.
+
+    Returns:
+    Tuple[str, str]: The colorized alignments.
+    """
+    colored_align1 = ""
+    colored_align2 = ""
+
+    for a, b in zip(align1, align2):
+        if a == b and a != "-":
+            colored_align1 += Fore.GREEN + a + Style.RESET_ALL
+            colored_align2 += Fore.GREEN + b + Style.RESET_ALL
+        elif a == "-" or b == "-":
+            colored_align1 += Fore.RED + a + Style.RESET_ALL
+            colored_align2 += Fore.RED + b + Style.RESET_ALL
+        else:
+            colored_align1 += Fore.YELLOW + a + Style.RESET_ALL
+            colored_align2 += Fore.YELLOW + b + Style.RESET_ALL
+
+    return colored_align1, colored_align2
+
+
 def main():
     # Let's parse the input arguments for alignments in CLI
     import argparse
@@ -412,9 +444,11 @@ def main():
         gap_extension=args.gap_extension,
     )
 
-    print("Alignment 1:", align1)
-    print("Alignment 2:", align2)
-    print("Score:", score)
+    colored1, colored2 = colorize_alignment(align1, align2)
+
+    print("Alignment 1:", colored1)
+    print("Alignment 2:", colored2)
+    print("Score:      ", score)
 
 
 if __name__ == "__main__":
