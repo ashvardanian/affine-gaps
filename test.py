@@ -1,19 +1,119 @@
-from random import choice
+from random import choice, getrandbits, randint
 from typing import Iterable, Tuple
+import string
+import re
 
 import pytest
 import numpy as np
+import stringzilla as sz
+from Bio import Align
+from Bio.Align import substitution_matrices
+
+from affine_gaps import needleman_wunsch_gotoh_alignment, needleman_wunsch_gotoh_score
 
 
-def test_against_levenshtein():
+def replace_single_dashes(text, replacement):
+    within_line = r"[^-](-)[^-]"
+    before_line = r"^(-)[^-]"
+    after_line = r"[^-](-)$"
+    result = re.sub(within_line, replacement, text)
+    result = re.sub(before_line, replacement, text)
+    result = re.sub(after_line, replacement, text)
+    return result
 
-    from affine_gaps import needleman_wunsch_gotoh_alignment
-    from Bio import Align
 
-    # The Levenshtein distance is the same as the Needleman-Wunsch algorithm with gap scores -1, -1
-    a = "kitten"
-    b = "sitting"
-    levenshtein_distance = needleman_wunsch_goto
+@pytest.mark.parametrize("min_length", [3, 7])
+@pytest.mark.parametrize("max_length", [7, 15])
+def test_against_levenshtein(min_length, max_length):
+
+    alphabet = string.ascii_lowercase[:3]
+    str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+    str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+
+    distance = sz.edit_distance(str1, str2)
+    aligned1, aligned2, aligned_score = needleman_wunsch_gotoh_alignment(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=-1,
+        gap_extension=-1,
+        match=0,
+        mismatch=-1,
+    )
+    only_score = needleman_wunsch_gotoh_score(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=-1,
+        gap_extension=-1,
+        match=0,
+        mismatch=-1,
+    )
+    assert distance == -aligned_score, f"Wrong alignment: {aligned1} & {aligned2}"
+    assert distance == -only_score, f"Wrong alignment: {aligned1} & {aligned2}"
+
+
+@pytest.mark.parametrize("min_length", [3, 7])
+@pytest.mark.parametrize("max_length", [7, 15])
+@pytest.mark.parametrize("match_score", [1, 2, 3])
+@pytest.mark.parametrize("mismatch_score", [-4, -2])
+@pytest.mark.parametrize("gap_opening", [-5, -1])
+def test_gap_expansions(
+    min_length: int,
+    max_length: int,
+    match_score: int,
+    mismatch_score: int,
+    gap_opening: int,
+):
+
+    alphabet = string.ascii_lowercase[:3]
+    str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+    str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+
+    aligned1, aligned2, score = needleman_wunsch_gotoh_alignment(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=gap_opening,
+        gap_extension=0,
+        match=match_score,
+        mismatch=mismatch_score,
+    )
+
+    # If there is a gap in any of the strings, we can expand that gap
+    # infinitely, and if the `gap_extension` cost is set to zero, no
+    # penalty will be incurred.
+    present_gaps = aligned1.count("-") + aligned2.count("-")
+    if present_gaps == 0:
+        return
+
+    # Let's now validate the baseline for our air-gapped strings
+    air_gapped1 = replace_single_dashes(aligned1, " ")
+    air_gapped2 = replace_single_dashes(aligned2, " ")
+    aig_gapped_score = needleman_wunsch_gotoh_alignment(
+        air_gapped1,
+        air_gapped2,
+        substitution_alphabet=alphabet + " ",
+        gap_opening=gap_opening,
+        gap_extension=0,
+        match=match_score,
+        mismatch=mismatch_score,
+    )
+
+    # Keep growing those gaps and make sure the score remains the same
+    for gap_width in range(2, 5):
+        wide_gapped1 = replace_single_dashes(aligned1, " " * gap_width)
+        wide_gapped2 = replace_single_dashes(aligned2, " " * gap_width)
+        wide_gapped_score = needleman_wunsch_gotoh_alignment(
+            wide_gapped1,
+            wide_gapped2,
+            substitution_alphabet=alphabet + " ",
+            gap_opening=gap_opening,
+            gap_extension=0,
+            match=match_score,
+            mismatch=mismatch_score,
+        )
+        assert wide_gapped_score == aig_gapped_score, f"Gap width: {gap_width}"
 
 
 def biopy_alignment_score(
@@ -22,8 +122,6 @@ def biopy_alignment_score(
     open_gap_score: int,
     extend_gap_score: int,
 ) -> Tuple[int, str, Iterable[Iterable[int]]]:
-    from Bio import Align
-    from Bio.Align import substitution_matrices
 
     # The aligner picks a different algorithm based on settings.
     # The Needleman-Wunsch algorithm is used if `open_gap_score` and `extend_gap_score` are equal.
