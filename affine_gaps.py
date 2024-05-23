@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 
 import numpy as np
 import numba as nb
@@ -99,7 +99,7 @@ def levenshtein_alignment_kernel(
             insert = scores[i][j - 1] + 1
             substitute = scores[i - 1][j - 1] + cost
 
-            # Determine the minimum cost operation
+            # Determine the minimum cost operation, preserving the operation kind
             if delete <= insert and delete <= substitute:
                 scores[i][j] = delete
                 changes[i][j] = DELETE
@@ -111,6 +111,37 @@ def levenshtein_alignment_kernel(
                 changes[i][j] = op
 
     return scores, changes
+
+
+def reconstruct_alignment(
+    changes: np.ndarray,
+    seq1: np.ndarray,
+    seq2: np.ndarray,
+    code_to_char: Callable,
+) -> Tuple[str, str]:
+
+    seq1_len = len(seq1)
+    seq2_len = len(seq2)
+    align1, align2 = "", ""
+    i, j = seq1_len, seq2_len
+
+    # Backtrack to recover the alignment
+    while i > 0 or j > 0:
+        if changes[i][j] == DELETE:
+            align1 += code_to_char(seq1[i - 1])
+            align2 += "-"
+            i -= 1
+        elif changes[i][j] == INSERT:
+            align1 += "-"
+            align2 += code_to_char(seq2[j - 1])
+            j -= 1
+        else:  # MATCH or SUBSTITUTE
+            align1 += code_to_char(seq1[i - 1])
+            align2 += code_to_char(seq2[j - 1])
+            i -= 1
+            j -= 1
+
+    return align1[::-1], align2[::-1]
 
 
 def levenshtein_alignment(str1: str, str2: str) -> Tuple[str, str, int]:
@@ -127,29 +158,8 @@ def levenshtein_alignment(str1: str, str2: str) -> Tuple[str, str, int]:
     seq1 = np.array([ord(c) for c in str1], dtype=int)
     seq2 = np.array([ord(c) for c in str2], dtype=int)
     scores, changes = levenshtein_alignment_kernel(seq1, seq2)
-
-    seq1_len = len(seq1)
-    seq2_len = len(seq2)
-    align1, align2 = "", ""
-    i, j = seq1_len, seq2_len
-
-    # Backtrack to recover the alignment
-    while i > 0 or j > 0:
-        if changes[i][j] == DELETE:
-            align1 += chr(seq1[i - 1])
-            align2 += "-"
-            i -= 1
-        elif changes[i][j] == INSERT:
-            align1 += "-"
-            align2 += chr(seq2[j - 1])
-            j -= 1
-        else:  # MATCH or SUBSTITUTE
-            align1 += chr(seq1[i - 1])
-            align2 += chr(seq2[j - 1])
-            i -= 1
-            j -= 1
-
-    return align1[::-1], align2[::-1], int(scores[seq1_len][seq2_len])
+    align1, align2 = reconstruct_alignment(changes, seq1, seq2, chr)
+    return align1[::-1], align2[::-1], int(scores[-1][-1])
 
 
 def _translate_sequence(seq: str, alphabet: str) -> np.ndarray:
@@ -166,7 +176,7 @@ def needleman_wunsch_gotoh_kernel(
     substitution_matrix: np.ndarray,
     gap_opening: int,
     gap_extension: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Implements Gotoh's algorithm for sequence alignment with affine gap penalties.
     Returns values equal or higher than BioPython, which contains an initialization
@@ -174,7 +184,7 @@ def needleman_wunsch_gotoh_kernel(
 
     This function aligns two sequences using Gotoh's algorithm, an extension of the
     Needleman-Wunsch algorithm, incorporating affine gap penalties. It calculates
-    three matrices: scores, gaps1, and gaps2, to determine the optimal alignment
+    two matrices: scores and changes, to determine the optimal alignment
     score. The alignment itself can also be reconstructed using these matrices.
 
     Parameters:
@@ -187,8 +197,7 @@ def needleman_wunsch_gotoh_kernel(
     Returns:
     Tuple[np.ndarray, np.ndarray, np.ndarray]: The matrices for alignment scoring:
         - scores: The primary scoring matrix.
-        - gaps1: The matrix for gaps in the first sequence.
-        - gaps2: The matrix for gaps in the second sequence.
+        - changes: The matrix for gaps in the first sequence.
 
     Example usage:
     >>> seq1 = np.array([1, 2, 3])  # Example sequence
@@ -196,7 +205,7 @@ def needleman_wunsch_gotoh_kernel(
     >>> substitution_matrix = np.array([[...], [...], [...]])  # Example substitution matrix
     >>> gap_opening = 5
     >>> gap_extension = 2
-    >>> scores, gaps1, gaps2 = needleman_wunsch_gotoh_kernel(seq1, seq2, substitution_matrix, gap_opening, gap_extension)
+    >>> scores, changes = needleman_wunsch_gotoh_kernel(seq1, seq2, substitution_matrix, gap_opening, gap_extension)
     >>> print("Optimal alignment score matrix:\n", scores)
 
     Notes:
@@ -219,14 +228,27 @@ def needleman_wunsch_gotoh_kernel(
     scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
     gaps1 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
     gaps2 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
     gaps1[:, 0] = _int32_min
     gaps2[0, :] = _int32_min
 
-    # Initialize the scoring matrix
+    # Initialize the scoring matrix, following the suggestions in the paper.
+    scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps1 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps2 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
+    gaps1[:, 0] = _int32_min
+    gaps2[0, :] = _int32_min
+
+    # Initialize the scoring matrix, following the suggestions in the paper.
     for i in range(1, seq1_len + 1):
         scores[i][0] = gap_opening + (i - 1) * gap_extension
+        gaps1[i][0] = scores[i][0]
+        changes[i][0] = DELETE
     for j in range(1, seq2_len + 1):
         scores[0][j] = gap_opening + (j - 1) * gap_extension
+        gaps2[0][j] = scores[0][j]
+        changes[0][j] = INSERT
 
     # Fill the scoring matrix
     for i in range(1, seq1_len + 1):
@@ -243,7 +265,15 @@ def needleman_wunsch_gotoh_kernel(
             match = scores[i - 1][j - 1] + substitution
             scores[i][j] = max(match, gaps1[i][j], gaps2[i][j])
 
-    return scores, gaps1, gaps2
+            # Track changes
+            if scores[i][j] == match:
+                changes[i][j] = MATCH if seq1[i - 1] == seq2[j - 1] else SUBSTITUTE
+            elif scores[i][j] == gaps1[i][j]:
+                changes[i][j] = DELETE
+            else:
+                changes[i][j] = INSERT
+
+    return scores, changes
 
 
 def _needleman_wunsch_gotoh_args_validation(
@@ -333,7 +363,7 @@ def needleman_wunsch_gotoh_alignment(
 
     seq1 = _translate_sequence(str1, substitution_alphabet)
     seq2 = _translate_sequence(str2, substitution_alphabet)
-    scores, gaps1, gaps2 = needleman_wunsch_gotoh_kernel(
+    scores, changes = needleman_wunsch_gotoh_kernel(
         seq1,
         seq2,
         substitution_matrix=substitution_matrix,
@@ -341,31 +371,13 @@ def needleman_wunsch_gotoh_alignment(
         gap_extension=gap_extension,
     )
 
-    seq1_len = len(seq1)
-    seq2_len = len(seq2)
-    align1, align2 = "", ""
-    i, j = seq1_len, seq2_len
-    while i > 0 or j > 0:
-        if (
-            i > 0
-            and j > 0
-            and scores[i][j]
-            == scores[i - 1][j - 1] + substitution_matrix[(seq1[i - 1], seq2[j - 1])]
-        ):
-            align1 += str1[i - 1]
-            align2 += str2[j - 1]
-            i -= 1
-            j -= 1
-        elif i > 0 and scores[i][j] == gaps1[i][j]:
-            align1 += str1[i - 1]
-            align2 += "-"
-            i -= 1
-        else:
-            align1 += "-"
-            align2 += str2[j - 1]
-            j -= 1
-
-    return align1[::-1], align2[::-1], int(scores[seq1_len][seq2_len])
+    align1, align2 = reconstruct_alignment(
+        changes,
+        seq1,
+        seq2,
+        lambda x: substitution_alphabet[x],
+    )
+    return align1[::-1], align2[::-1], int(scores[-1][-1])
 
 
 @nb.jit(nopython=True)
