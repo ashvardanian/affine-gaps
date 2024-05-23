@@ -1,4 +1,4 @@
-from random import choice, getrandbits, randint
+from random import choice, randint
 from typing import Iterable, Tuple
 import string
 import re
@@ -9,7 +9,12 @@ import stringzilla as sz
 from Bio import Align
 from Bio.Align import substitution_matrices
 
-from affine_gaps import needleman_wunsch_gotoh_alignment, needleman_wunsch_gotoh_score
+from affine_gaps import (
+    needleman_wunsch_gotoh_alignment,
+    needleman_wunsch_gotoh_score,
+    levenshtein_alignment,
+    colorize_alignment,
+)
 
 
 def replace_single_dashes(text, replacement):
@@ -30,8 +35,8 @@ def test_against_levenshtein(min_length, max_length):
     str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
     str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
 
-    distance = sz.edit_distance(str1, str2)
-    aligned1, aligned2, aligned_score = needleman_wunsch_gotoh_alignment(
+    lev1, lev2, lev_score = levenshtein_alignment(str1, str2)
+    nw1, nw2, nw_score = needleman_wunsch_gotoh_alignment(
         str1,
         str2,
         substitution_alphabet=alphabet,
@@ -49,8 +54,16 @@ def test_against_levenshtein(min_length, max_length):
         match=0,
         mismatch=-1,
     )
-    assert distance == -aligned_score, f"Wrong alignment: {aligned1} & {aligned2}"
-    assert distance == -only_score, f"Wrong alignment: {aligned1} & {aligned2}"
+
+    lev1, lev2 = colorize_alignment(lev1, lev2)
+    nw1, nw2 = colorize_alignment(nw1, nw2)
+    assert (
+        lev_score == -nw_score and lev_score == -only_score
+    ), f"""
+    Levenshtein and Needleman-Wunsch should return the same score.
+    Levenshtein scored {lev_score}:\n{lev1}\n{lev2}
+    Needleman-Wunsch scored {nw_score}:\n{nw1}\n{nw2}
+    """
 
 
 @pytest.mark.parametrize("min_length", [3, 7])
@@ -88,8 +101,8 @@ def test_gap_expansions(
         return
 
     # Let's now validate the baseline for our air-gapped strings
-    air_gapped1 = replace_single_dashes(aligned1, " ")
-    air_gapped2 = replace_single_dashes(aligned2, " ")
+    air_gapped1 = replace_single_dashes(aligned1, " ").replace("-", "")
+    air_gapped2 = replace_single_dashes(aligned2, " ").replace("-", "")
     aig_gapped_score = needleman_wunsch_gotoh_alignment(
         air_gapped1,
         air_gapped2,
@@ -102,8 +115,8 @@ def test_gap_expansions(
 
     # Keep growing those gaps and make sure the score remains the same
     for gap_width in range(2, 5):
-        wide_gapped1 = replace_single_dashes(aligned1, " " * gap_width)
-        wide_gapped2 = replace_single_dashes(aligned2, " " * gap_width)
+        wide_gapped1 = replace_single_dashes(aligned1, " " * gap_width).replace("-", "")
+        wide_gapped2 = replace_single_dashes(aligned2, " " * gap_width).replace("-", "")
         wide_gapped_score = needleman_wunsch_gotoh_alignment(
             wide_gapped1,
             wide_gapped2,

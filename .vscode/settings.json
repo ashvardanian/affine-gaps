@@ -19,6 +19,7 @@
         "Needleman",
         "nopython",
         "numba",
+        "pytest",
         "stringzilla",
         "Vardanian",
         "Wunsch"

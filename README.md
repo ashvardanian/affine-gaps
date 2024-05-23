@@ -85,3 +85,18 @@ aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
 aligner.open_gap_score = open_gap_score
 aligner.extend_gap_score = extend_gap_score
 ```
+
+## Testing & Development
+
+First thing we should test, is that the Needleman-Wunsch is symmetric with respect to the argument order, if the substitution matrix is symmetric.
+
+```bash
+
+```
+
+The Needleman-Wunsch alignment score should be equal to the negated Levenshtein distance for some match/mismatch costs.
+
+```bash
+pytest test.py -s -x -k levenshtein
+```
+

@@ -10,6 +10,8 @@ _int32_min = np.iinfo(np.int32).min
 
 _colorama_init(autoreset=True)
 
+# Constants for operation codes
+MATCH, INSERT, DELETE, SUBSTITUTE = 0, 1, 2, 3
 
 # By default, we use BLOSUM62 with affine gap penalties
 default_substitution_alphabet: str = "ARNDCQEGHILKMFPSTWYVBZX"
@@ -49,6 +51,105 @@ default_substitution_matrix = (
 )
 default_gap_opening: int = -4 * 5
 default_gap_extension: int = int(-0.2 * 5)
+
+
+@nb.jit(nopython=True)
+def levenshtein_alignment_kernel(
+    seq1: np.ndarray, seq2: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Implements Levenshtein edit distance computation for 2 arrays of character
+    runes (code-points), using a naive quadratic complexity (in space and time)
+    algorithm, to allow recovering the sequence alignment.
+
+    Parameters:
+    seq1 (np.ndarray): The first sequence to be aligned.
+    seq2 (np.ndarray): The second sequence to be aligned.
+
+    Returns:
+    Tuple[np.ndarray, np.ndarray]: The matrices for alignment scoring:
+        - scores: The primary scoring matrix.
+        - changes: The matrix of enums, with cells equal to MATCH, INSERT, DELETE, or SUBSTITUTE.
+    """
+    seq1_len = len(seq1)
+    seq2_len = len(seq2)
+
+    scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
+
+    # Initialize the scoring matrix
+    for i in range(1, seq1_len + 1):
+        scores[i][0] = i
+        changes[i][0] = DELETE
+    for j in range(1, seq2_len + 1):
+        scores[0][j] = j
+        changes[0][j] = INSERT
+
+    # Fill the scoring matrix and track operations
+    for i in range(1, seq1_len + 1):
+        for j in range(1, seq2_len + 1):
+            if seq1[i - 1] == seq2[j - 1]:
+                cost = 0
+                op = MATCH
+            else:
+                cost = 1
+                op = SUBSTITUTE
+
+            delete = scores[i - 1][j] + 1
+            insert = scores[i][j - 1] + 1
+            substitute = scores[i - 1][j - 1] + cost
+
+            # Determine the minimum cost operation
+            if delete <= insert and delete <= substitute:
+                scores[i][j] = delete
+                changes[i][j] = DELETE
+            elif insert <= delete and insert <= substitute:
+                scores[i][j] = insert
+                changes[i][j] = INSERT
+            else:
+                scores[i][j] = substitute
+                changes[i][j] = op
+
+    return scores, changes
+
+
+def levenshtein_alignment(str1: str, str2: str) -> Tuple[str, str, int]:
+    """
+    Aligns two sequences using Levenshtein's algorithm.
+
+    Parameters:
+    str1 (str): The first sequence to be aligned.
+    str2 (str): The second sequence to be aligned.
+
+    Returns:
+    Tuple[str, str, int]: The optimal alignment of the two sequences and the alignment score.
+    """
+    seq1 = np.array([ord(c) for c in str1], dtype=int)
+    seq2 = np.array([ord(c) for c in str2], dtype=int)
+    scores, changes = levenshtein_alignment_kernel(seq1, seq2)
+
+    seq1_len = len(seq1)
+    seq2_len = len(seq2)
+    align1, align2 = "", ""
+    i, j = seq1_len, seq2_len
+
+    # Backtrack to recover the alignment
+    while i > 0 or j > 0:
+        if changes[i][j] == DELETE:
+            align1 += chr(seq1[i - 1])
+            align2 += "-"
+            i -= 1
+        elif changes[i][j] == INSERT:
+            align1 += "-"
+            align2 += chr(seq2[j - 1])
+            j -= 1
+        else:  # MATCH or SUBSTITUTE
+            align1 += chr(seq1[i - 1])
+            align2 += chr(seq2[j - 1])
+            i -= 1
+            j -= 1
+
+    return align1[::-1], align2[::-1], int(scores[seq1_len][seq2_len])
 
 
 def _translate_sequence(seq: str, alphabet: str) -> np.ndarray:
@@ -145,46 +246,15 @@ def needleman_wunsch_gotoh_kernel(
     return scores, gaps1, gaps2
 
 
-def needleman_wunsch_gotoh_alignment(
-    str1: str,
-    str2: str,
+def _needleman_wunsch_gotoh_args_validation(
     substitution_alphabet: Optional[str] = None,
     substitution_matrix: Optional[np.ndarray] = None,
     gap_opening: Optional[int] = None,
     gap_extension: Optional[int] = None,
     match: Optional[int] = None,
     mismatch: Optional[int] = None,
-) -> Tuple[str, str, int]:
-    """
-    Aligns two sequences using Gotoh's algorithm with affine gap penalties.
-
-    Parameters:
-    str1 (str): The first sequence to be aligned.
-    str2 (str): The second sequence to be aligned.
-    substitution_alphabet (str): The optional alphabet used for the substitution matrix.
-    substitution_matrix (np.ndarray): The optional substitution matrix for scoring matches/mismatches.
-    gap_opening (int): The penalty for opening a gap.
-    gap_extension (int): The penalty for extending a gap.
-    match (Optional[int]): The score for a match, to compose the substitution matrix.
-    mismatch (Optional[int]): The score for a mismatch, to compose the substitution matrix.
-
-    Returns:
-    Tuple[str, str, int]: The optimal alignment of the two sequences and the alignment score.
-
-    Default values:
-    >>> substitution_alphabet = "ARNDCQEGHILKMFPSTWYVBZX"
-    >>> substitution_matrix = BLOSUM62 * 5
-    >>> gap_opening = -20
-    >>> gap_extension = -1
-
-    Example usage:
-    >>> str1 = "GATTACA"
-    >>> str2 = "GCATGCU"
-    >>> align1, align2, score = gotoh_alignment(str1, str2)
-    >>> print("Alignment 1:", align1)
-    >>> print("Alignment 2:", align2)
-    >>> print("Score:", score)
-    """
+) -> Tuple[str, np.ndarray, int, int]:
+    """Internal method that validates the arguments for the Needleman-Wunsch algorithm."""
     if (match is not None) != (mismatch is not None):
         raise ValueError("Both match and mismatch must be provided.")
     if (match is not None) and (substitution_matrix is not None):
@@ -205,6 +275,61 @@ def needleman_wunsch_gotoh_alignment(
         gap_opening = default_gap_opening
     if gap_extension is None:
         gap_extension = default_gap_extension
+
+    return substitution_alphabet, substitution_matrix, gap_opening, gap_extension
+
+
+def needleman_wunsch_gotoh_alignment(
+    str1: str,
+    str2: str,
+    substitution_alphabet: Optional[str] = None,
+    substitution_matrix: Optional[np.ndarray] = None,
+    gap_opening: Optional[int] = None,
+    gap_extension: Optional[int] = None,
+    match: Optional[int] = None,
+    mismatch: Optional[int] = None,
+) -> Tuple[str, str, int]:
+    """
+    Aligns two sequences using Gotoh's algorithm with affine gap penalties.
+
+    Parameters:
+    str1 (str): The first sequence to be aligned.
+    str2 (str): The second sequence to be aligned.
+    substitution_alphabet (Optional[str]): The optional alphabet used for the substitution matrix.
+    substitution_matrix (Optional[np.ndarray]): The optional substitution matrix for scoring matches/mismatches.
+    gap_opening (Optional[int]): The penalty for opening a gap.
+    gap_extension (Optional[int]): The penalty for extending a gap.
+    match (Optional[int]): The score for a match, to compose the substitution matrix.
+    mismatch (Optional[int]): The score for a mismatch, to compose the substitution matrix.
+
+    Returns:
+    Tuple[str, str, int]: The optimal alignment of the two sequences and the alignment score.
+
+    Default values:
+    >>> substitution_alphabet = "ARNDCQEGHILKMFPSTWYVBZX"
+    >>> substitution_matrix = BLOSUM62 * 5
+    >>> gap_opening = -20
+    >>> gap_extension = -1
+
+    Example usage:
+    >>> from affine_gaps import needleman_wunsch_gotoh_alignment
+    >>> str1 = "GATTACA"
+    >>> str2 = "GCATGCU"
+    >>> align1, align2, score = needleman_wunsch_gotoh_alignment(str1, str2)
+    >>> print("Alignment 1:", align1)
+    >>> print("Alignment 2:", align2)
+    >>> print("Score:", score)
+    """
+    substitution_alphabet, substitution_matrix, gap_opening, gap_extension = (
+        _needleman_wunsch_gotoh_args_validation(
+            substitution_alphabet=substitution_alphabet,
+            substitution_matrix=substitution_matrix,
+            gap_opening=gap_opening,
+            gap_extension=gap_extension,
+            match=match,
+            mismatch=mismatch,
+        )
+    )
 
     seq1 = _translate_sequence(str1, substitution_alphabet)
     seq2 = _translate_sequence(str2, substitution_alphabet)
@@ -316,10 +441,12 @@ def needleman_wunsch_gotoh_score_kernel(
 def needleman_wunsch_gotoh_score(
     str1: str,
     str2: str,
-    substitution_alphabet: str = default_substitution_alphabet,
-    substitution_matrix: np.ndarray = default_substitution_matrix,
-    gap_opening: int = default_gap_opening,
-    gap_extension: int = default_gap_extension,
+    substitution_alphabet: Optional[str] = None,
+    substitution_matrix: Optional[np.ndarray] = None,
+    gap_opening: Optional[int] = None,
+    gap_extension: Optional[int] = None,
+    match: Optional[int] = None,
+    mismatch: Optional[int] = None,
 ) -> int:
     """
     Compute the score of the optimal alignment of two sequences using the Gotoh algorithm,
@@ -328,14 +455,32 @@ def needleman_wunsch_gotoh_score(
     error.
 
     Parameters:
-    seq1 (np.ndarray): The first sequence to be aligned.
-    seq2 (np.ndarray): The second sequence to be aligned.
-    substitution_matrix (np.ndarray): The substitution matrix for scoring matches/mismatches.
-    gap_opening (int): The penalty for opening a gap.
-    gap_extension (int): The penalty for extending a gap.
+    str1 (str): The first sequence to be aligned.
+    str2 (str): The second sequence to be aligned.
+    substitution_alphabet (Optional[str]): The optional alphabet used for the substitution matrix.
+    substitution_matrix (Optional[np.ndarray]): The optional substitution matrix for scoring matches/mismatches.
+    gap_opening (Optional[int]): The penalty for opening a gap.
+    gap_extension (Optional[int]): The penalty for extending a gap.
+    match (Optional[int]): The score for a match, to compose the substitution matrix.
+    mismatch (Optional[int]): The score for a mismatch, to compose the substitution matrix.
 
     Returns:
     int: The alignment score.
+
+    Default values:
+    >>> substitution_alphabet = "ARNDCQEGHILKMFPSTWYVBZX"
+    >>> substitution_matrix = BLOSUM62 * 5
+    >>> gap_opening = -20
+    >>> gap_extension = -1
+
+    Example usage:
+    >>> from affine_gaps import needleman_wunsch_gotoh_score
+    >>> str1 = "GATTACA"
+    >>> str2 = "GCATGCU"
+    >>> score = needleman_wunsch_gotoh_score(str1, str2)
+    >>> print("Alignment 1:", align1)
+    >>> print("Alignment 2:", align2)
+    >>> print("Score:", score)
     """
 
     # The inner loop must be the longer one, assuming the latency of calls
@@ -345,6 +490,16 @@ def needleman_wunsch_gotoh_score(
     # if (substitution_matrix == substitution_matrix.T).all():
     #     if len(str1) > len(str2):
     #         str1, str2 = str2, str1
+    substitution_alphabet, substitution_matrix, gap_opening, gap_extension = (
+        _needleman_wunsch_gotoh_args_validation(
+            substitution_alphabet=substitution_alphabet,
+            substitution_matrix=substitution_matrix,
+            gap_opening=gap_opening,
+            gap_extension=gap_extension,
+            match=match,
+            mismatch=mismatch,
+        )
+    )
 
     seq1 = _translate_sequence(str1, substitution_alphabet)
     seq2 = _translate_sequence(str2, substitution_alphabet)
