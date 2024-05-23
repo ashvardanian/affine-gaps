@@ -17,4 +17,10 @@ setup(
         "Operating System :: OS Independent",
     ],
     python_requires=">=3.6",
+    extras_require={"dev": ["biopython", "stringzilla", "pytest", "pytest-repeat"]},
+    entry_points={
+        "console_scripts": [
+            "affine-gaps=affine_gaps:main",
+        ],
+    },
 )
