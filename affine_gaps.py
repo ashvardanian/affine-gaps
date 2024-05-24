@@ -5,8 +5,6 @@ import numba as nb
 from colorama import Fore, Style
 from colorama import init as _colorama_init
 
-_int32_max = np.iinfo(np.int32).max
-_int32_min = np.iinfo(np.int32).min
 
 _colorama_init(autoreset=True)
 
@@ -14,8 +12,8 @@ _colorama_init(autoreset=True)
 MATCH, INSERT, DELETE, SUBSTITUTE = 0, 1, 2, 3
 
 # By default, we use BLOSUM62 with affine gap penalties
-default_substitution_alphabet: str = "ARNDCQEGHILKMFPSTWYVBZX"
-default_substitution_matrix = (
+default_proteins_alphabet: str = "ARNDCQEGHILKMFPSTWYVBZX"
+default_proteins_matrix = (
     np.array(
         [
             # fmt: off
@@ -74,41 +72,38 @@ def levenshtein_alignment_kernel(
     seq1_len = len(seq1)
     seq2_len = len(seq2)
 
-    scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
+    # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
+    scores = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
 
     # Initialize the scoring matrix
+    scores[0, 0] = 0
     for i in range(1, seq1_len + 1):
-        scores[i][0] = i
-        changes[i][0] = DELETE
+        scores[i, 0] = i
+        changes[i, 0] = DELETE
     for j in range(1, seq2_len + 1):
-        scores[0][j] = j
-        changes[0][j] = INSERT
+        scores[0, j] = j
+        changes[0, j] = INSERT
 
     # Fill the scoring matrix and track operations
     for i in range(1, seq1_len + 1):
         for j in range(1, seq2_len + 1):
-            if seq1[i - 1] == seq2[j - 1]:
-                cost = 0
-                op = MATCH
-            else:
-                cost = 1
-                op = SUBSTITUTE
 
-            delete = scores[i - 1][j] + 1
-            insert = scores[i][j - 1] + 1
-            substitute = scores[i - 1][j - 1] + cost
+            substitution = int(seq1[i - 1] != seq2[j - 1])
+
+            delete = scores[i - 1, j] + 1
+            insert = scores[i, j - 1] + 1
+            replace = scores[i - 1, j - 1] + substitution
+            score = min(replace, delete, insert)
+            scores[i, j] = score
 
             # Determine the minimum cost operation, preserving the operation kind
-            if delete <= insert and delete <= substitute:
-                scores[i][j] = delete
-                changes[i][j] = DELETE
-            elif insert <= delete and insert <= substitute:
-                scores[i][j] = insert
-                changes[i][j] = INSERT
+            if score == replace:
+                changes[i, j] = MATCH if seq1[i - 1] == seq2[j - 1] else SUBSTITUTE
+            elif score == delete:
+                changes[i, j] = DELETE
             else:
-                scores[i][j] = substitute
-                changes[i][j] = op
+                changes[i, j] = INSERT
 
     return scores, changes
 
@@ -166,6 +161,9 @@ def _translate_sequence(seq: str, alphabet: str) -> np.ndarray:
     # def map_char(char):
     #     offset = alphabet.find(char)
     #     return offset if offset >= 0 else len(seq) - 1
+    assert all(
+        char in alphabet for char in seq
+    ), f"Found unknown character in sequence: {seq}"
     return np.array([alphabet.index(char) for char in seq], dtype=np.uint8)
 
 
@@ -225,53 +223,65 @@ def needleman_wunsch_gotoh_kernel(
     seq1_len = len(seq1)
     seq2_len = len(seq2)
 
-    scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps1 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps2 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
-    gaps1[:, 0] = _int32_min
-    gaps2[0, :] = _int32_min
-
     # Initialize the scoring matrix, following the suggestions in the paper.
-    scores = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps1 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps2 = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    changes = np.zeros((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
-    gaps1[:, 0] = _int32_min
-    gaps2[0, :] = _int32_min
+    # There:
+    #
+    #   v ~ is gap opening penalty (always non-negative in paper, opposite for us)
+    #   u ~ is gap extension penalty (always non-positive in paper, opposite for us)
+    #   w(k) = u * k + v
+    #
+    #   D(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n
+    #   P(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n,
+    #             that end with a deletion of at least one residue from A, such that A(m)
+    #             is aligned with a gap symbol
+    #   Q(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n,
+    #             that end with an insertion of at least one residue from B, such that B(n)
+    #             is aligned with a gap symbol
+    #
+    # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
+    scores = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps1 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps2 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
 
-    # Initialize the scoring matrix, following the suggestions in the paper.
-    for i in range(1, seq1_len + 1):
-        scores[i][0] = gap_opening + (i - 1) * gap_extension
-        gaps1[i][0] = scores[i][0]
-        changes[i][0] = DELETE
+    # Initialize the scoring matrix, following the suggestions in the paper,
+    # so that the values in header (left or top) "gaps" are always smaller than those
+    # in the "scores", and they are not considered as starting points in each iteration.
+    scores[0, 0] = 0
     for j in range(1, seq2_len + 1):
-        scores[0][j] = gap_opening + (j - 1) * gap_extension
-        gaps2[0][j] = scores[0][j]
-        changes[0][j] = INSERT
+        scores[0, j] = gap_opening + (j - 1) * gap_extension
+        gaps1[0, j] = scores[0, j] + gap_opening + gap_extension
+        changes[0, j] = INSERT
 
     # Fill the scoring matrix
     for i in range(1, seq1_len + 1):
+        scores[i, 0] = gap_opening + (i - 1) * gap_extension
+        gaps2[i, 0] = scores[i, 0] + gap_opening + gap_extension
+        changes[i, 0] = DELETE
+
         for j in range(1, seq2_len + 1):
-            gaps1[i][j] = max(
-                scores[i - 1][j] + gap_opening,
-                gaps1[i - 1][j] + gap_extension,
-            )
-            gaps2[i][j] = max(
-                scores[i][j - 1] + gap_opening,
-                gaps2[i][j - 1] + gap_extension,
-            )
             substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
-            match = scores[i - 1][j - 1] + substitution
-            scores[i][j] = max(match, gaps1[i][j], gaps2[i][j])
+            delete = max(
+                scores[i - 1, j] + gap_opening,
+                gaps1[i - 1, j] + gap_extension,
+            )
+            insert = max(
+                scores[i, j - 1] + gap_opening,
+                gaps2[i, j - 1] + gap_extension,
+            )
+            replace = scores[i - 1, j - 1] + substitution
+            score = max(replace, delete, insert)
+            scores[i, j] = score
+            gaps1[i, j] = delete
+            gaps2[i, j] = insert
 
             # Track changes
-            if scores[i][j] == match:
-                changes[i][j] = MATCH if seq1[i - 1] == seq2[j - 1] else SUBSTITUTE
-            elif scores[i][j] == gaps1[i][j]:
-                changes[i][j] = DELETE
+            if score == replace:
+                changes[i, j] = MATCH if seq1[i - 1] == seq2[j - 1] else SUBSTITUTE
+            elif score == delete:
+                changes[i, j] = DELETE
             else:
-                changes[i][j] = INSERT
+                changes[i, j] = INSERT
 
     return scores, changes
 
@@ -293,10 +303,10 @@ def _needleman_wunsch_gotoh_args_validation(
         )
 
     if substitution_alphabet is None:
-        substitution_alphabet = default_substitution_alphabet
+        substitution_alphabet = default_proteins_alphabet
     if substitution_matrix is None:
         if match is None:
-            substitution_matrix = default_substitution_matrix
+            substitution_matrix = default_proteins_matrix
         else:
             n = len(substitution_alphabet)
             substitution_matrix = np.full((n, n), mismatch)
@@ -408,46 +418,44 @@ def needleman_wunsch_gotoh_score_kernel(
     seq1_len = len(seq1)
     seq2_len = len(seq2)
 
-    current_score_row = np.zeros(seq2_len + 1, dtype=np.int32)
-    previous_score_row = np.zeros(seq2_len + 1, dtype=np.int32)
-    current_gaps1_row = np.zeros(seq2_len + 1, dtype=np.int32)
-    previous_gaps1_row = np.zeros(seq2_len + 1, dtype=np.int32)
-    current_gaps2_row = np.zeros(seq2_len + 1, dtype=np.int32)
-    previous_gaps2_row = np.zeros(seq2_len + 1, dtype=np.int32)
+    # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
+    old_scores = np.empty(seq2_len + 1, dtype=np.int32)
+    new_scores = np.empty(seq2_len + 1, dtype=np.int32)
+    old_gaps1 = np.empty(seq2_len + 1, dtype=np.int32)
+    new_gaps1 = np.empty(seq2_len + 1, dtype=np.int32)
+    old_gaps2 = np.empty(seq2_len + 1, dtype=np.int32)
+    new_gaps2 = np.empty(seq2_len + 1, dtype=np.int32)
 
-    # Initialize the two rows of the scoring matrix
-    previous_gaps2_row[:] = _int32_min
+    # Initialize the scoring matrix, following the suggestions in the paper,
+    # so that the values in header (left or top) "gaps" are always smaller than those
+    # in the "scores", and they are not considered as starting points in each iteration.
+    old_scores[0] = 0
     for j in range(1, seq2_len + 1):
-        previous_score_row[j] = gap_opening + (j - 1) * gap_extension
+        old_scores[j] = gap_opening + (j - 1) * gap_extension
+        old_gaps1[j] = old_scores[j] + gap_opening + gap_extension
 
     for i in range(1, seq1_len + 1):
-        current_score_row[0] = gap_opening + (i - 1) * gap_extension
-        current_gaps1_row[0] = _int32_min
+        new_scores[0] = gap_opening + (i - 1) * gap_extension
+        new_gaps2[0] = new_scores[0] + gap_opening + gap_extension
 
         for j in range(1, seq2_len + 1):
-            current_gaps1_row[j] = max(
-                previous_score_row[j] + gap_opening,
-                previous_gaps1_row[j] + gap_extension,
-            )
-            current_gaps2_row[j] = max(
-                current_score_row[j - 1] + gap_opening,
-                current_gaps2_row[j - 1] + gap_extension,
-            )
-
             substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
-            match = previous_score_row[j - 1] + substitution
-            current_score_row[j] = max(
-                match,
-                current_gaps1_row[j],
-                current_gaps2_row[j],
+            delete = max(old_scores[j] + gap_opening, old_gaps1[j] + gap_extension)
+            insert = max(
+                new_scores[j - 1] + gap_opening, new_gaps2[j - 1] + gap_extension
             )
+            replace = old_scores[j - 1] + substitution
+            score = max(replace, delete, insert)
+            new_scores[j] = score
+            new_gaps1[j] = delete
+            new_gaps2[j] = insert
 
         # Swap rows
-        previous_score_row, current_score_row = current_score_row, previous_score_row
-        previous_gaps1_row, current_gaps1_row = current_gaps1_row, previous_gaps1_row
-        previous_gaps2_row, current_gaps2_row = current_gaps2_row, previous_gaps2_row
+        old_scores, new_scores = new_scores, old_scores
+        old_gaps1, new_gaps1 = new_gaps1, old_gaps1
+        old_gaps2, new_gaps2 = new_gaps2, old_gaps2
 
-    return previous_score_row[-1]
+    return old_scores[-1]
 
 
 def needleman_wunsch_gotoh_score(

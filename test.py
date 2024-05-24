@@ -1,7 +1,11 @@
-from random import choice, randint
-from typing import Iterable, Tuple
-import string
+import os
 import re
+import math
+import string
+import tempfile
+import subprocess
+from random import choice, randint, getrandbits
+from typing import Iterable, Tuple
 
 import pytest
 import numpy as np
@@ -14,27 +18,174 @@ from affine_gaps import (
     needleman_wunsch_gotoh_score,
     levenshtein_alignment,
     colorize_alignment,
+    default_proteins_alphabet,
+    default_proteins_matrix,
 )
+
+"""
+Test the symmetry of Needleman-Wunsch alignment.
+
+Verifies that the alignment score of A<->B is the same as B<->A for random DNA sequences.
+"""
+
+
+@pytest.mark.repeat(30)
+@pytest.mark.parametrize("min_length", [5, 10])
+@pytest.mark.parametrize("max_length", [15, 25])
+def test_symmetry(min_length: int, max_length: int):
+    alphabet = "ACGT"
+    str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+    str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+
+    # Compute alignment scores
+    score1 = needleman_wunsch_gotoh_score(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=-1,
+        gap_extension=-1,
+        match=0,
+        mismatch=-1,
+    )
+
+    score2 = needleman_wunsch_gotoh_score(
+        str2,
+        str1,
+        substitution_alphabet=alphabet,
+        gap_opening=-1,
+        gap_extension=-1,
+        match=0,
+        mismatch=-1,
+    )
+
+    assert (
+        score1 == score2
+    ), f"Alignment score symmetry failed for {str1} <-> {str2}. Score1: {score1}, Score2: {score2}"
+
+
+def run_emboss(
+    seq1: str,
+    seq2: str,
+    match: int = 0,
+    mismatch: int = -1,
+    gap_opening: int = -1,
+    gap_extension: int = -1,
+):
+
+    matrix_content = f"""
+A  C  G  T
+A  {match}  {mismatch}  {mismatch}  {mismatch}
+C  {mismatch}  {match}  {mismatch}  {mismatch}
+G  {mismatch}  {mismatch}  {match}  {mismatch}
+T  {mismatch}  {mismatch}  {mismatch}  {match}
+    """
+
+    # Create temporary files for sequences and matrix
+    with tempfile.NamedTemporaryFile(
+        mode="w", delete=False, suffix=".fa"
+    ) as tmp1, tempfile.NamedTemporaryFile(
+        mode="w", delete=False, suffix=".fa"
+    ) as tmp2, tempfile.NamedTemporaryFile(
+        mode="w", delete=False, suffix=".mat"
+    ) as tmp_matrix, tempfile.NamedTemporaryFile(
+        mode="w", delete=False, suffix=".txt"
+    ) as tmp_output:
+
+        tmp1.write(f">seq1\n{seq1}\n")
+        tmp2.write(f">seq2\n{seq2}\n")
+        tmp_matrix.write(matrix_content)
+
+        tmp1_name = tmp1.name
+        tmp2_name = tmp2.name
+        matrix_name = tmp_matrix.name
+        output_name = tmp_output.name
+
+    try:
+        os.chmod(tmp1_name, 0o644)
+        os.chmod(tmp2_name, 0o644)
+        os.chmod(matrix_name, 0o644)
+        os.chmod(output_name, 0o644)
+
+        command = [
+            "needle",
+            "-asequence",
+            tmp1_name,
+            "-bsequence",
+            tmp2_name,
+            "-gapopen",
+            str(-gap_opening),
+            "-gapextend",
+            str(-gap_extension),
+            "-datafile",
+            matrix_name,
+            "-outfile",
+            output_name,
+        ]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        # Check if the subprocess call was successful
+        if result.returncode != 0:
+            raise Exception(
+                f"Needle failed with return code {result.returncode} and error message: {result.stderr}"
+            )
+
+        # Read the output file
+        with open(output_name, "r") as file:
+            output_content = file.read()
+
+        # Extract relevant information using regex
+        score_match = re.search(r"Score:\s+([0-9.]+)", output_content)
+        alignment_match = re.findall(
+            r"(seq\d\s+\d+\s+([A-Za-z-]+)\s+\d+)", output_content
+        )
+
+        assert score_match, f"Score not found in {output_content}"
+        assert alignment_match, f"Alignments not found in {output_content}"
+
+        score = int(math.floor(float(score_match.group(1))))
+        alignments = [x[1] for x in alignment_match]
+        assert len(alignments) == 2, f"Expected 2 alignments, got {len(alignments)}"
+
+        return alignments[0], alignments[1], score
+
+    finally:
+        os.remove(tmp1_name)
+        os.remove(tmp2_name)
+        os.remove(matrix_name)
+        os.remove(output_name)
 
 
 def replace_single_dashes(text, replacement):
     within_line = r"[^-](-)[^-]"
     before_line = r"^(-)[^-]"
     after_line = r"[^-](-)$"
-    result = re.sub(within_line, replacement, text)
-    result = re.sub(before_line, replacement, text)
-    result = re.sub(after_line, replacement, text)
+    result = text
+    result = re.sub(within_line, replacement, result)
+    result = re.sub(before_line, replacement, result)
+    result = re.sub(after_line, replacement, result)
     return result
 
 
+"""
+Test Levenshtein and Needleman-Wunsch-Gotoh alignment consistency.
+
+Ensures that Levenshtein and Needleman-Wunsch-Gotoh alignments produce the same scores and 
+alignments for sequences of varying lengths within a specified alphabet.
+"""
+
+
+@pytest.mark.repeat(30)
 @pytest.mark.parametrize("min_length", [3, 7])
 @pytest.mark.parametrize("max_length", [7, 15])
 def test_against_levenshtein(min_length, max_length):
 
-    alphabet = string.ascii_lowercase[:3]
+    alphabet = "ACGT"
     str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
     str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
 
+    # A subprocess may take a while to evaluate
+    # emboss1, emboss2, emboss_score = run_emboss(str1, str2)
     lev1, lev2, lev_score = levenshtein_alignment(str1, str2)
     nw1, nw2, nw_score = needleman_wunsch_gotoh_alignment(
         str1,
@@ -66,8 +217,16 @@ def test_against_levenshtein(min_length, max_length):
     """
 
 
-@pytest.mark.parametrize("min_length", [3, 7])
-@pytest.mark.parametrize("max_length", [7, 15])
+"""
+Test the effect of gap expansions on alignment scores.
+
+Verifies that increasing the width of gaps in alignments with zero gap extension penalties 
+does not change the alignment score, ensuring proper handling of gap costs.
+"""
+
+
+@pytest.mark.parametrize("min_length", [5, 10])
+@pytest.mark.parametrize("max_length", [15, 25])
 @pytest.mark.parametrize("match_score", [1, 2, 3])
 @pytest.mark.parametrize("mismatch_score", [-4, -2])
 @pytest.mark.parametrize("gap_opening", [-5, -1])
@@ -79,7 +238,7 @@ def test_gap_expansions(
     gap_opening: int,
 ):
 
-    alphabet = string.ascii_lowercase[:3]
+    alphabet = "ACGT"
     str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
     str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
 
@@ -100,41 +259,156 @@ def test_gap_expansions(
     if present_gaps == 0:
         return
 
-    # Let's now validate the baseline for our air-gapped strings
-    air_gapped1 = replace_single_dashes(aligned1, " ").replace("-", "")
-    air_gapped2 = replace_single_dashes(aligned2, " ").replace("-", "")
-    aig_gapped_score = needleman_wunsch_gotoh_alignment(
-        air_gapped1,
-        air_gapped2,
-        substitution_alphabet=alphabet + " ",
-        gap_opening=gap_opening,
-        gap_extension=0,
-        match=match_score,
-        mismatch=mismatch_score,
-    )
+    def expand_any_one(seq1, seq2, gap_width: int = 1):
+        if bool(getrandbits(1)):
+            return replace_single_dashes(seq1, "?" * gap_width).replace(
+                "-", ""
+            ), seq2.replace("-", "")
+        else:
+            return seq1.replace("-", ""), replace_single_dashes(
+                seq2, "?" * gap_width
+            ).replace("-", "")
 
-    # Keep growing those gaps and make sure the score remains the same
-    for gap_width in range(2, 5):
-        wide_gapped1 = replace_single_dashes(aligned1, " " * gap_width).replace("-", "")
-        wide_gapped2 = replace_single_dashes(aligned2, " " * gap_width).replace("-", "")
-        wide_gapped_score = needleman_wunsch_gotoh_alignment(
-            wide_gapped1,
-            wide_gapped2,
-            substitution_alphabet=alphabet + " ",
+    # Let's now precompute the baseline for our air-gapped strings
+    air_gapped1, air_gapped2 = expand_any_one(aligned1, aligned2)
+    air_gapped_aligned1, air_gapped_aligned2, aig_gapped_score = (
+        needleman_wunsch_gotoh_alignment(
+            air_gapped1,
+            air_gapped2,
+            substitution_alphabet=alphabet + "?",
             gap_opening=gap_opening,
             gap_extension=0,
             match=match_score,
             mismatch=mismatch_score,
         )
-        assert wide_gapped_score == aig_gapped_score, f"Gap width: {gap_width}"
+    )
+
+    # Keep growing those gaps and make sure the score remains the same
+    wide_gapped1, wide_gapped2 = air_gapped1, air_gapped2
+    for gap_width in range(2, 5):
+        wide_gapped1, wide_gapped2 = expand_any_one(
+            wide_gapped1, wide_gapped2, gap_width
+        )
+        wide_gapped_aligned1, wide_gapped_aligned2, wide_gapped_score = (
+            needleman_wunsch_gotoh_alignment(
+                wide_gapped1,
+                wide_gapped2,
+                substitution_alphabet=alphabet + "?",
+                gap_opening=gap_opening,
+                gap_extension=0,
+                match=match_score,
+                mismatch=mismatch_score,
+            )
+        )
+        assert (
+            wide_gapped_score == aig_gapped_score
+        ), f"""
+        Expected score:     {aig_gapped_score}
+        Expected alignment: {colorize_alignment(air_gapped_aligned1, air_gapped_aligned2)[0]}
+                            {colorize_alignment(air_gapped_aligned1, air_gapped_aligned2)[1]}
+        
+        Gap width:          {gap_width}
+        Actual score:       {wide_gapped_score}
+        Final alignment:    {colorize_alignment(wide_gapped_aligned1, wide_gapped_aligned2)[0]}
+                            {colorize_alignment(wide_gapped_aligned1, wide_gapped_aligned2)[1]}
+        """
 
 
-def biopy_alignment_score(
-    a: str,
-    b: str,
-    open_gap_score: int,
-    extend_gap_score: int,
-) -> Tuple[int, str, Iterable[Iterable[int]]]:
+"""
+Compare affine gap alignment scores with BioPython for specific examples.
+
+Ensures that the Needleman-Wunsch-Gotoh alignment scores are at least as good as 
+BioPython's PairwiseAligner scores for a set of sequence pairs and scoring parameters.
+"""
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ("GGTGTGA", "TCGCGT"),  # presumably fails NW-align
+        ("AAAGGG", "TTAAAAGGGGTT"),  # presumably fails Bio++
+        ("CGCCTTAC", "AAATTTGC"),  # presumably fails Bio++
+        ("TAAATTTGC", "TCGCCTTAC"),  # presumably fails T-Coffee
+        ("AAATTTGC", "CGCCTTAC"),  # presumably fails FOGSAA
+        ("AGAT", "CTCT"),  # presumably fails HUSAR, MatLab, and BioPyhton
+    ],
+)
+@pytest.mark.parametrize(
+    "scores",
+    [
+        (0, -1, -5, -1),  # match, mismatch, gap_opening, gap_extension
+        (10, -30, -40, -1),  # match, mismatch, gap_opening, gap_extension
+        (10, -30, -25, -1),  # match, mismatch, gap_opening, gap_extension
+    ],
+)
+def test_against_biopython_examples(
+    pair: Tuple[str, str],
+    scores: Tuple[int, int, int, int],
+):
+    a, b = pair
+    match, mismatch, open_gap_score, extend_gap_score = scores
+
+    affinegaps_score = needleman_wunsch_gotoh_score(
+        a,
+        b,
+        match=match,
+        mismatch=mismatch,
+        gap_opening=open_gap_score,
+        gap_extension=extend_gap_score,
+        substitution_alphabet="ACGT",
+    )
+
+    # Compute BioPython score using PairwiseAligner
+    aligner = Align.PairwiseAligner(mode="global")
+    aligner.match_score = match
+    aligner.mismatch_score = mismatch
+    aligner.open_gap_score = open_gap_score
+    aligner.extend_gap_score = extend_gap_score
+    biopython_score = int(aligner.score(a, b))
+
+    assert (
+        affinegaps_score >= biopython_score
+    ), "Affine Gaps alignments should be at least as good as BioPython"
+
+    if affinegaps_score != biopython_score:
+        pytest.warns(
+            UserWarning,
+            match=f"Affine Gaps score is not equal to BioPython score for {a} and {b}",
+        )
+
+
+"""
+Compare affine gap alignment scores with BioPython for random sequences.
+
+Verifies that the Needleman-Wunsch-Gotoh alignment scores are at least as good as 
+BioPython's PairwiseAligner scores for randomly generated sequences with various gap penalties.
+"""
+
+
+@pytest.mark.repeat(30)
+@pytest.mark.parametrize("first_length", [20, 100])
+@pytest.mark.parametrize("second_length", [20, 100])
+@pytest.mark.parametrize(
+    "gap_scores",
+    [
+        (-2, -2),
+        (-2, -1),
+        (-2, 0),
+        (2, 3),
+        (12, 13),
+        (-10, -1),
+    ],
+)
+def test_against_biopython_fuzzy(
+    first_length: int,
+    second_length: int,
+    gap_scores: Tuple[int, int],
+):
+    open_gap_score, extend_gap_score = gap_scores
+
+    # Make sure we generate different strings each time
+    a = "".join(choice(default_proteins_alphabet) for _ in range(first_length))
+    b = "".join(choice(default_proteins_alphabet) for _ in range(second_length))
 
     # The aligner picks a different algorithm based on settings.
     # The Needleman-Wunsch algorithm is used if `open_gap_score` and `extend_gap_score` are equal.
@@ -144,74 +418,68 @@ def biopy_alignment_score(
     aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
     aligner.open_gap_score = open_gap_score
     aligner.extend_gap_score = extend_gap_score
-    score = int(aligner.score(a, b))
+    biopython_score = int(aligner.score(a, b))
 
     # Remove the stop codon from the alphabet before using it
-    alphabet = str(aligner.substitution_matrix.alphabet).replace("*", "")
-    matrix = np.array(aligner.substitution_matrix).astype(np.int8)
-    matrix = matrix[: len(alphabet), : len(alphabet)]
+    #
+    #   alphabet = str(aligner.substitution_matrix.alphabet).replace("*", "")
+    #   matrix = np.array(aligner.substitution_matrix).astype(np.int8)
+    #   matrix = matrix[: len(alphabet), : len(alphabet)]
 
-    return score, alphabet, matrix
-
-
-def affinegaps_alignment_score(
-    a: str,
-    b: str,
-    open_gap_score: int,
-    extend_gap_score: int,
-) -> Tuple[int, str, Iterable[Iterable[int]]]:
-    from affine_gaps import needleman_wunsch_gotoh_score
-    from affine_gaps import default_substitution_alphabet, default_substitution_matrix
-
-    score = needleman_wunsch_gotoh_score(
+    affinegaps_score = needleman_wunsch_gotoh_score(
         a,
         b,
         gap_opening=open_gap_score,
         gap_extension=extend_gap_score,
-    )
-
-    return score, default_substitution_alphabet, default_substitution_matrix
-
-
-typical_alignment_gap_scores = [
-    # (-2, -2),
-    (-2, -1),
-    (-2, 0),
-    (2, 3),
-    (12, 13),
-    (-10, -1),
-]
-
-
-@pytest.mark.repeat(30)
-@pytest.mark.parametrize("first_length", [20, 100])
-@pytest.mark.parametrize("second_length", [20, 100])
-@pytest.mark.parametrize("gap_scores", typical_alignment_gap_scores)
-def test_against_biopython(
-    first_length: int,
-    second_length: int,
-    gap_scores: Tuple[int, int],
-):
-    open_gap_score, extend_gap_score = gap_scores
-
-    # Make sure we generate different strings each time
-    common_aminoacids = "ARNDCQEGHILKMFPSTWYVBZX"
-    a = "".join(choice(common_aminoacids) for _ in range(first_length))
-    b = "".join(choice(common_aminoacids) for _ in range(second_length))
-
-    biopy_score, _, _ = biopy_alignment_score(
-        a,
-        b,
-        open_gap_score=open_gap_score,
-        extend_gap_score=extend_gap_score,
-    )
-    affinegaps_score, _, _ = affinegaps_alignment_score(
-        a,
-        b,
-        open_gap_score=open_gap_score,
-        extend_gap_score=extend_gap_score,
+        substitution_alphabet=default_proteins_alphabet,
+        substitution_matrix=default_proteins_matrix,
     )
 
     assert (
-        affinegaps_score >= biopy_score
+        affinegaps_score >= biopython_score
     ), "Affine Gaps alignments should be at least as good as BioPython"
+
+    if affinegaps_score != biopython_score:
+        pytest.warns(
+            UserWarning,
+            match=f"Affine Gaps score is not equal to BioPython score for {a} and {b}",
+        )
+
+
+@pytest.mark.repeat(10)
+def test_against_biopython_long():
+
+    # Make sure we generate different strings each time
+    alphabet = "AC"
+    first_length, second_length = 1200, 1300
+    match, mismatch, open_gap_score, extend_gap_score = 1, -1, -1, 0
+    a = "".join(choice(alphabet) for _ in range(first_length))
+    b = "".join(choice(alphabet) for _ in range(second_length))
+
+    affinegaps_score = needleman_wunsch_gotoh_score(
+        a,
+        b,
+        match=match,
+        mismatch=mismatch,
+        gap_opening=open_gap_score,
+        gap_extension=extend_gap_score,
+        substitution_alphabet=alphabet,
+    )
+
+    # Compute BioPython score using PairwiseAligner
+    aligner = Align.PairwiseAligner(mode="global")
+    aligner.match_score = match
+    aligner.mismatch_score = mismatch
+    aligner.open_gap_score = open_gap_score
+    aligner.extend_gap_score = extend_gap_score
+    biopython_score = int(aligner.score(a, b))
+
+    assert (
+        affinegaps_score >= biopython_score
+    ), "Affine Gaps alignments should be at least as good as BioPython"
+
+    if affinegaps_score != biopython_score:
+        pytest.warns(
+            UserWarning,
+            match=f"Affine Gaps score is not equal to BioPython score for {a} and {b}",
+        )
