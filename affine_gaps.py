@@ -56,15 +56,14 @@ def _reconstruct_alignment(
     seq1: np.ndarray,
     seq2: np.ndarray,
     code_to_char: Callable,
+    should_continue: Callable,
 ) -> Tuple[str, str]:
 
-    seq1_len = len(seq1)
-    seq2_len = len(seq2)
     align1, align2 = "", ""
-    i, j = seq1_len, seq2_len
+    i, j = len(seq1), len(seq2)
 
     # Backtrack to recover the alignment
-    while i > 0 or j > 0:
+    while should_continue(i, j):
         if changes[i, j] == DELETE:
             align1 += code_to_char(seq1[i - 1])
             align2 += "-"
@@ -122,11 +121,16 @@ def _validate_gotoh_arguments(
 
 
 @nb.jit(nopython=True)
-def levenshtein_alignment_kernel(seq1: np.ndarray, seq2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _levenshtein_alignment_kernel(seq1: np.ndarray, seq2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Implements Levenshtein edit distance computation for 2 arrays of character
-    runes (code-points), using a naive quadratic complexity (in space and time)
-    algorithm, to allow recovering the sequence alignment.
+    Aligns two sequences using Levenshtein's algorithm.
+    The returned distance is the minimum number of single-character edits,
+    including insertions, deletions, and substitutions, required to change one
+    sequence into the other.
+
+    The kernel has quadratic complexity in space and time, as it stores the
+    entire scoring matrix and the operations for each cell, to allow the
+    reconstruction of the alignment. Should be called through `levenshtein_alignment`.
 
     Parameters:
     seq1 (np.ndarray): The first sequence to be aligned.
@@ -179,6 +183,9 @@ def levenshtein_alignment_kernel(seq1: np.ndarray, seq2: np.ndarray) -> Tuple[np
 def levenshtein_alignment(str1: str, str2: str) -> Tuple[str, str, int]:
     """
     Aligns two sequences using Levenshtein's algorithm.
+    The returned distance is the minimum number of single-character edits,
+    including insertions, deletions, and substitutions, required to change one
+    sequence into the other.
 
     Parameters:
     str1 (str): The first sequence to be aligned.
@@ -189,13 +196,13 @@ def levenshtein_alignment(str1: str, str2: str) -> Tuple[str, str, int]:
     """
     seq1 = np.array([ord(c) for c in str1], dtype=np.uint32)
     seq2 = np.array([ord(c) for c in str2], dtype=np.uint32)
-    scores, changes = levenshtein_alignment_kernel(seq1, seq2)
-    align1, align2 = _reconstruct_alignment(changes, seq1, seq2, chr)
+    scores, changes = _levenshtein_alignment_kernel(seq1, seq2)
+    align1, align2 = _reconstruct_alignment(changes, seq1, seq2, chr, lambda i, j: i > 0 and j > 0)
     return align1, align2, int(scores[-1, -1])
 
 
 @nb.jit(nopython=True)
-def needleman_wunsch_gotoh_kernel(
+def _needleman_wunsch_gotoh_kernel(
     seq1: np.ndarray,
     seq2: np.ndarray,
     substitution_matrix: np.ndarray,
@@ -203,14 +210,15 @@ def needleman_wunsch_gotoh_kernel(
     gap_extension: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Implements Gotoh's algorithm for sequence alignment with affine gap penalties.
-    Returns values equal or higher than BioPython, which contains an initialization
-    error.
+    Aligns two sequences using Gotoh's affine gap penalty extensions for the
+    Needleman-Wunsch global alignment algorithm.
 
-    This function aligns two sequences using Gotoh's algorithm, an extension of the
-    Needleman-Wunsch algorithm, incorporating affine gap penalties. It calculates
-    two matrices: scores and changes, to determine the optimal alignment
-    score. The alignment itself can also be reconstructed using these matrices.
+    The kernel has quadratic complexity in space and time, as it stores the
+    entire scoring matrix and the operations for each cell, to allow the
+    reconstruction of the alignment. Allocates four equivalent-size matrices
+    to store the scores, running cost of gaps in the first sequence, running
+    cost of gaps in the second sequence, and the operations for each cell.
+    Should be called through `needleman_wunsch_gotoh`.
 
     Parameters:
     seq1 (np.ndarray): The first sequence to be aligned.
@@ -230,7 +238,7 @@ def needleman_wunsch_gotoh_kernel(
     >>> substitution_matrix = np.array([[...], [...], [...]])  # Example substitution matrix
     >>> gap_opening = 5
     >>> gap_extension = 2
-    >>> scores, changes = needleman_wunsch_gotoh_kernel(seq1, seq2, substitution_matrix, gap_opening, gap_extension)
+    >>> scores, changes = _needleman_wunsch_gotoh_kernel(seq1, seq2, substitution_matrix, gap_opening, gap_extension)
     >>> print("Optimal alignment score matrix:\n", scores)
 
     Notes:
@@ -324,7 +332,8 @@ def needleman_wunsch_gotoh_alignment(
     mismatch: Optional[int] = None,
 ) -> Tuple[str, str, int]:
     """
-    Aligns two sequences using Gotoh's algorithm with affine gap penalties.
+    Aligns two sequences using Gotoh's affine gap penalty extensions for the
+    Needleman-Wunsch global alignment algorithm.
 
     Parameters:
     str1 (str): The first sequence to be aligned.
@@ -365,7 +374,7 @@ def needleman_wunsch_gotoh_alignment(
 
     seq1 = _translate_sequence(str1, substitution_alphabet)
     seq2 = _translate_sequence(str2, substitution_alphabet)
-    scores, changes = needleman_wunsch_gotoh_kernel(
+    scores, changes = _needleman_wunsch_gotoh_kernel(
         seq1,
         seq2,
         substitution_matrix=substitution_matrix,
@@ -378,6 +387,7 @@ def needleman_wunsch_gotoh_alignment(
         seq1,
         seq2,
         lambda x: substitution_alphabet[x],
+        lambda i, j: i > 0 and j > 0,
     )
     return align1, align2, int(scores[-1, -1])
 
@@ -391,10 +401,14 @@ def needleman_wunsch_gotoh_score_kernel(
     gap_extension: int,
 ) -> int:
     """
-    Compute the score of the optimal alignment of two sequences using the Gotoh algorithm,
-    while only consuming a linear amount of memory, storing only 2 rows per matrix.
-    Returns values equal or higher than BioPython, which contains an initialization
-    error.
+    Measures the alignment score of two sequences using Gotoh's affine gap penalty extensions for the
+    Needleman-Wunsch global alignment algorithm. Uses less memory than the alignment function.
+
+    The kernel has quadratic complexity in time and linear in space, as it stores
+    only two rows of each matrix. Allocates four equivalent-size matrices
+    to store the scores, running cost of gaps in the first sequence, running
+    cost of gaps in the second sequence, and the operations for each cell.
+    Should be called through `needleman_wunsch_gotoh_score`.
 
     Parameters:
     seq1 (np.ndarray): The first sequence to be aligned.
@@ -459,10 +473,8 @@ def needleman_wunsch_gotoh_score(
     mismatch: Optional[int] = None,
 ) -> int:
     """
-    Compute the score of the optimal alignment of two sequences using the Gotoh algorithm,
-    while only consuming a linear amount of memory, storing only 2 rows per matrix.
-    Returns values equal or higher than BioPython, which contains an initialization
-    error.
+    Measures the alignment score of two sequences using Gotoh's affine gap penalty extensions for the
+    Needleman-Wunsch global alignment algorithm. Uses less memory than the alignment function.
 
     Parameters:
     str1 (str): The first sequence to be aligned.
@@ -521,6 +533,189 @@ def needleman_wunsch_gotoh_score(
     )
 
     return int(score)
+
+
+@nb.jit(nopython=True)
+def _smith_waterman_gotoh_kernel(
+    seq1: np.ndarray,
+    seq2: np.ndarray,
+    substitution_matrix: np.ndarray,
+    gap_opening: int,
+    gap_extension: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Aligns two sequences using Gotoh's affine gap penalty extensions for the
+    Smith-Waterman local alignment algorithm.
+
+    The kernel has quadratic complexity in space and time, as it stores the
+    entire scoring matrix and the operations for each cell, to allow the
+    reconstruction of the alignment. Allocates four equivalent-size matrices
+    to store the scores, running cost of gaps in the first sequence, running
+    cost of gaps in the second sequence, and the operations for each cell.
+    Should be called through `smith_waterman_gotoh`.
+
+    Parameters:
+    seq1 (np.ndarray): The first sequence to be aligned.
+    seq2 (np.ndarray): The second sequence to be aligned.
+    substitution_matrix (np.ndarray): A substitution matrix for scoring matches/mismatches.
+    gap_opening (int): The penalty for opening a gap.
+    gap_extension (int): The penalty for extending a gap.
+
+    Returns:
+    Tuple[np.ndarray, np.ndarray, np.ndarray]: The matrices for alignment scoring:
+        - scores: The primary scoring matrix.
+        - changes: The matrix for gaps in the first sequence.
+
+    Example usage:
+    >>> seq1 = np.array([1, 2, 3])  # Example sequence
+    >>> seq2 = np.array([3, 2, 1])  # Example sequence
+    >>> substitution_matrix = np.array([[...], [...], [...]])  # Example substitution matrix
+    >>> gap_opening = 5
+    >>> gap_extension = 2
+    >>> scores, changes = _smith_waterman_gotoh_kernel(seq1, seq2, substitution_matrix, gap_opening, gap_extension)
+    >>> print("Optimal alignment score matrix:\n", scores)
+
+    Notes:
+    The basis and recurrence relations for the matrices are as follows:
+    Basis:
+    - scores[i, 0] = gap_opening + (i - 1) * gap_extension
+    - scores[0, j] = gap_opening + (j - 1) * gap_extension
+    - gaps1[i, 0] = gap_opening + (i - 1) * gap_extension
+    - gaps2[0, j] = gap_opening + (j - 1) * gap_extension
+
+    Recurrence:
+    - gaps1[i, j] = max(scores[i - 1, j] + gap_opening, gaps1[i - 1, j] + gap_extension)
+    - gaps2[i, j] = max(scores[i, j - 1] + gap_opening, gaps2[i, j - 1] + gap_extension)
+    - match = scores[i - 1, j - 1] + substitution_matrix[(seq1[i - 1], seq2[j - 1])]
+    - scores[i, j] = max(match, gaps1[i, j], gaps2[i, j], 0)
+    """
+    seq1_len = len(seq1)
+    seq2_len = len(seq2)
+
+    # Initialize the scoring matrix, following the suggestions in the paper.
+    # There:
+    #
+    #   v ~ is gap opening penalty (always non-negative in paper, opposite for us)
+    #   u ~ is gap extension penalty (always non-positive in paper, opposite for us)
+    #   w(k) = u * k + v
+    #
+    #   D(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n
+    #   P(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n,
+    #             that end with a deletion of at least one residue from A, such that A(m)
+    #             is aligned with a gap symbol
+    #   Q(m, n) ~ is the score of the optimal alignment of the prefixes of length m and n,
+    #             that end with an insertion of at least one residue from B, such that B(n)
+    #             is aligned with a gap symbol
+    #
+    # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
+    scores = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps1 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    gaps2 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    changes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
+
+    # Initialize the scoring matrix, following the suggestions in the paper,
+    # so that the values in header (left or top) "gaps" are always smaller than those
+    # in the "scores", and they are not considered as starting points in each iteration.
+    scores[0, :] = 0
+    gaps1[0, :] = gap_opening + gap_extension
+    changes[0, :] = INSERT
+
+    # Unlike Needleman-Wunsch, we also track the position of the maximum score.
+    max_score = 0
+    max_pos = (0, 0)
+
+    # Fill the scoring matrix
+    for i in range(1, seq1_len + 1):
+        scores[i, 0] = 0
+        gaps2[i, 0] = gap_opening + gap_extension
+        changes[i, 0] = DELETE
+
+        for j in range(1, seq2_len + 1):
+            substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
+            delete = max(
+                scores[i - 1, j] + gap_opening,
+                gaps1[i - 1, j] + gap_extension,
+            )
+            insert = max(
+                scores[i, j - 1] + gap_opening,
+                gaps2[i, j - 1] + gap_extension,
+            )
+            replace = scores[i - 1, j - 1] + substitution
+            score = max(replace, delete, insert, 0)
+            scores[i, j] = score
+            gaps1[i, j] = delete
+            gaps2[i, j] = insert
+
+            # Track changes
+            if score == replace:
+                changes[i, j] = MATCH if seq1[i - 1] == seq2[j - 1] else SUBSTITUTE
+            elif score == delete:
+                changes[i, j] = DELETE
+            else:
+                changes[i, j] = INSERT
+
+            # Update max score and position
+            if score > max_score:
+                max_score = score
+                max_pos = (i, j)
+
+    return scores, changes, max_pos
+
+
+def smith_waterman_gotoh_alignment(
+    str1: str,
+    str2: str,
+    substitution_alphabet: Optional[str] = None,
+    substitution_matrix: Optional[np.ndarray] = None,
+    gap_opening: Optional[int] = None,
+    gap_extension: Optional[int] = None,
+    match: Optional[int] = None,
+    mismatch: Optional[int] = None,
+) -> Tuple[str, str, int]:
+    """
+    Aligns two sequences using the Smith-Waterman algorithm for local alignment.
+
+    Parameters:
+    str1 (str): The first sequence to be aligned.
+    str2 (str): The second sequence to be aligned.
+    substitution_alphabet (Optional[str]): The optional alphabet used for the substitution matrix.
+    substitution_matrix (Optional[np.ndarray]): The optional substitution matrix for scoring matches/mismatches.
+    gap_opening (Optional[int]): The penalty for opening a gap.
+    gap_extension (Optional[int]): The penalty for extending a gap.
+    match (Optional[int]): The score for a match, to compose the substitution matrix.
+    mismatch (Optional[int]): The score for a mismatch, to compose the substitution matrix.
+
+    Returns:
+    Tuple[str, str, int]: The optimal local alignment of the two sequences and the alignment score.
+    """
+    substitution_alphabet, substitution_matrix, gap_opening, gap_extension = _validate_gotoh_arguments(
+        substitution_alphabet=substitution_alphabet,
+        substitution_matrix=substitution_matrix,
+        gap_opening=gap_opening,
+        gap_extension=gap_extension,
+        match=match,
+        mismatch=mismatch,
+    )
+
+    seq1 = _translate_sequence(str1, substitution_alphabet)
+    seq2 = _translate_sequence(str2, substitution_alphabet)
+    scores, changes, max_pos = _smith_waterman_gotoh_kernel(
+        seq1,
+        seq2,
+        substitution_matrix=substitution_matrix,
+        gap_opening=gap_opening,
+        gap_extension=gap_extension,
+    )
+
+    prefix1, prefix2 = max_pos
+    align1, align2 = _reconstruct_alignment(
+        changes[: prefix1 + 1, : prefix2 + 1],
+        seq1[:prefix1],
+        seq2[:prefix2],
+        lambda x: substitution_alphabet[x],
+        lambda i, j: i > 0 and j > 0 and scores[i, j] > 0,
+    )
+    return align1, align2, int(scores[prefix1, prefix2])
 
 
 def colorize_alignment(align1: str, align2: str) -> Tuple[str, str]:
@@ -596,19 +791,32 @@ def main():
         default=None,
         help="The path to the substitution alphabet and costs matrix file",
     )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Use the Smith-Waterman algorithm for local alignment instead of Needleman-Wunsch",
+    )
     args = parser.parse_args()
 
-    align1, align2, score = needleman_wunsch_gotoh_alignment(
-        args.seq1,
-        args.seq2,
-        match=args.match,
-        mismatch=args.mismatch,
-        gap_opening=args.gap_opening,
-        gap_extension=args.gap_extension,
-    )
+    aligner = smith_waterman_gotoh_alignment if args.local else needleman_wunsch_gotoh_alignment
+    try:
+        align1, align2, score = aligner(
+            args.seq1,
+            args.seq2,
+            match=args.match,
+            mismatch=args.mismatch,
+            gap_opening=args.gap_opening,
+            gap_extension=args.gap_extension,
+        )
+    except Exception as exc:
+        print("Error:", exc)
+        exit(1)
 
     colored1, colored2 = colorize_alignment(align1, align2)
-
+    print()
+    print("Sequence 1:", args.seq1)
+    print("Sequence 2:", args.seq2)
+    print()
     print("Alignment 1:", colored1)
     print("Alignment 2:", colored2)
     print("Score:      ", score)
