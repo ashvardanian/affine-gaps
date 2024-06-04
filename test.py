@@ -1,15 +1,12 @@
 import os
 import re
 import math
-import string
 import tempfile
 import subprocess
 from random import choice, randint, getrandbits
-from typing import Iterable, Tuple
+from typing import Tuple
 
 import pytest
-import numpy as np
-import stringzilla as sz
 from Bio import Align
 from Bio.Align import substitution_matrices
 
