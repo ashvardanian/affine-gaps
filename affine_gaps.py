@@ -843,30 +843,45 @@ def smith_waterman_gotoh_score(
     return int(score)
 
 
-def colorize_alignment(align1: str, align2: str) -> Tuple[str, str]:
+def colorize_alignment(align1: str, align2: str, background: str = "dark") -> Tuple[str, str]:
     """
     Colorizes the alignment strings for visual distinction between matches, mismatches, and gaps.
+    Adjusts colors based on the specified background color.
 
     Parameters:
     align1 (str): The first aligned sequence.
     align2 (str): The second aligned sequence.
+    background (str): The background color of the terminal ('dark' or 'light').
 
     Returns:
     Tuple[str, str]: The colorized alignments.
     """
+    if background not in ("dark", "light"):
+        raise ValueError("Background must be either 'dark' or 'light'")
+
+    # Define color schemes
+    if background == "dark":
+        match_color = Fore.GREEN
+        mismatch_color = Fore.RED
+        gap_color = Fore.WHITE
+    else:
+        match_color = Fore.GREEN
+        mismatch_color = Fore.RED
+        gap_color = Fore.BLACK
+
     colored_align1 = ""
     colored_align2 = ""
 
     for a, b in zip(align1, align2):
         if a == b and a != "-":
-            colored_align1 += Fore.GREEN + a + Style.RESET_ALL
-            colored_align2 += Fore.GREEN + b + Style.RESET_ALL
+            colored_align1 += match_color + a + Style.RESET_ALL
+            colored_align2 += match_color + b + Style.RESET_ALL
         elif a == "-" or b == "-":
-            colored_align1 += Fore.BLACK + a + Style.RESET_ALL
-            colored_align2 += Fore.BLACK + b + Style.RESET_ALL
+            colored_align1 += gap_color + a + Style.RESET_ALL
+            colored_align2 += gap_color + b + Style.RESET_ALL
         else:
-            colored_align1 += Fore.RED + a + Style.RESET_ALL
-            colored_align2 += Fore.RED + b + Style.RESET_ALL
+            colored_align1 += mismatch_color + a + Style.RESET_ALL
+            colored_align2 += mismatch_color + b + Style.RESET_ALL
 
     return colored_align1, colored_align2
 

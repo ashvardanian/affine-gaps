@@ -94,7 +94,7 @@ aligner.extend_gap_score = extend_gap_score
 
 ## Using the Command Line Interface
 
-To compute the optimal global alignment of insulin and glucagon sequences with (5x-scaled) BLOSUM62 substitution matrix:
+To compute the optimal global alignment of insulin and glucagon sequences with (5x-scaled) BLOSUM62 substitution matrix through CLI:
 
 ```bash
 $ affine-gaps GIVEQCCTSICSLYQLENYCN HSQGTFTSDYSKYLDSRAEQDFV
@@ -107,7 +107,7 @@ $ affine-gaps GIVEQCCTSICSLYQLENYCN HSQGTFTSDYSKYLDSRAEQDFV
 > Score:       22
 ```
 
-To compute the local alignment of insulin and glucagon sequences:
+To compute the local alignment of insulin and glucagon sequences through CLI:
 
 ```bash
 
