@@ -34,7 +34,7 @@ During my exploration of exiting implementations, I've noticed several bugs:
 pip install git+https://github.com/ashvardanian/affine-gaps.git
 ```
 
-## Usaging the Library
+## Using the Library
 
 To obtain the alignment of two sequences, use the `needleman_wunsch_gotoh_alignment` function.
 
@@ -123,6 +123,13 @@ $ affine-gaps GIVEQCCTSICSLYQLENYCN HSQGTFTSDYSKYLDSRAEQDFV --local
 
 ## Testing & Development
 
+To test, install the development dependencies and run the tests.
+
+```bash
+pip install -e ".[dev]"
+pytest test.py -s -x
+```
+
 ### Symmetry Test for Needleman-Wunsch
 
 First, verify that the Needleman-Wunsch algorithm is symmetric with respect to the argument order, assuming the substitution matrix is symmetric.
@@ -137,6 +144,14 @@ The Needleman-Wunsch alignment score should be equal to the negated Levenshtein 
 
 ```bash
 pytest test.py -s -x -k levenshtein
+```
+
+### Alignment vs Scoring Consistency
+
+Check that the alignment score is consistent with the scoring function for specific sequences and scoring parameters.
+
+```bash
+pytest test.py -s -x -k scoring_vs_alignment
 ```
 
 ### Gap Expansion Test

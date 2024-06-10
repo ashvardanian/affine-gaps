@@ -246,14 +246,14 @@ def _needleman_wunsch_gotoh_kernel(
     Basis:
     - scores[i, 0] = gap_opening + (i - 1) * gap_extension
     - scores[0, j] = gap_opening + (j - 1) * gap_extension
-    - gaps1[i, 0] = gap_opening + (i - 1) * gap_extension
-    - gaps2[0, j] = gap_opening + (j - 1) * gap_extension
+    - deletes[i, 0] = gap_opening + (i - 1) * gap_extension
+    - inserts[0, j] = gap_opening + (j - 1) * gap_extension
 
     Recurrence:
-    - gaps1[i, j] = max(scores[i - 1, j] + gap_opening, gaps1[i - 1, j] + gap_extension)
-    - gaps2[i, j] = max(scores[i, j - 1] + gap_opening, gaps2[i, j - 1] + gap_extension)
+    - deletes[i, j] = max(scores[i - 1, j] + gap_opening, deletes[i - 1, j] + gap_extension)
+    - inserts[i, j] = max(scores[i, j - 1] + gap_opening, inserts[i, j - 1] + gap_extension)
     - match = scores[i - 1, j - 1] + substitution_matrix[(seq1[i - 1], seq2[j - 1])]
-    - scores[i, j] = max(match, gaps1[i, j], gaps2[i, j])
+    - scores[i, j] = max(match, deletes[i, j], inserts[i, j])
     """
     seq1_len = len(seq1)
     seq2_len = len(seq2)
@@ -275,8 +275,8 @@ def _needleman_wunsch_gotoh_kernel(
     #
     # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
     scores = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps1 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps2 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    deletes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    inserts = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
     changes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
 
     # Initialize the scoring matrix, following the suggestions in the paper,
@@ -285,30 +285,30 @@ def _needleman_wunsch_gotoh_kernel(
     scores[0, 0] = 0
     for j in range(1, seq2_len + 1):
         scores[0, j] = gap_opening + (j - 1) * gap_extension
-        gaps1[0, j] = scores[0, j] + gap_opening + gap_extension
+        deletes[0, j] = scores[0, j] + gap_opening + gap_extension
         changes[0, j] = INSERT
 
     # Fill the scoring matrix
     for i in range(1, seq1_len + 1):
         scores[i, 0] = gap_opening + (i - 1) * gap_extension
-        gaps2[i, 0] = scores[i, 0] + gap_opening + gap_extension
+        inserts[i, 0] = scores[i, 0] + gap_opening + gap_extension
         changes[i, 0] = DELETE
 
         for j in range(1, seq2_len + 1):
             substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
             delete = max(
                 scores[i - 1, j] + gap_opening,
-                gaps1[i - 1, j] + gap_extension,
+                deletes[i - 1, j] + gap_extension,
             )
             insert = max(
                 scores[i, j - 1] + gap_opening,
-                gaps2[i, j - 1] + gap_extension,
+                inserts[i, j - 1] + gap_extension,
             )
             replace = scores[i - 1, j - 1] + substitution
             score = max(replace, delete, insert)
             scores[i, j] = score
-            gaps1[i, j] = delete
-            gaps2[i, j] = insert
+            deletes[i, j] = delete
+            inserts[i, j] = insert
 
             # Track changes
             if score == replace:
@@ -427,10 +427,10 @@ def needleman_wunsch_gotoh_score_kernel(
     # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
     old_scores = np.empty(seq2_len + 1, dtype=np.int32)
     new_scores = np.empty(seq2_len + 1, dtype=np.int32)
-    old_gaps1 = np.empty(seq2_len + 1, dtype=np.int32)
-    new_gaps1 = np.empty(seq2_len + 1, dtype=np.int32)
-    old_gaps2 = np.empty(seq2_len + 1, dtype=np.int32)
-    new_gaps2 = np.empty(seq2_len + 1, dtype=np.int32)
+    old_deletes = np.empty(seq2_len + 1, dtype=np.int32)
+    new_deletes = np.empty(seq2_len + 1, dtype=np.int32)
+    old_inserts = np.empty(seq2_len + 1, dtype=np.int32)
+    new_inserts = np.empty(seq2_len + 1, dtype=np.int32)
 
     # Initialize the scoring matrix, following the suggestions in the paper,
     # so that the values in header (left or top) "gaps" are always smaller than those
@@ -438,26 +438,26 @@ def needleman_wunsch_gotoh_score_kernel(
     old_scores[0] = 0
     for j in range(1, seq2_len + 1):
         old_scores[j] = gap_opening + (j - 1) * gap_extension
-        old_gaps1[j] = old_scores[j] + gap_opening + gap_extension
+        old_deletes[j] = old_scores[j] + gap_opening + gap_extension
 
     for i in range(1, seq1_len + 1):
         new_scores[0] = gap_opening + (i - 1) * gap_extension
-        new_gaps2[0] = new_scores[0] + gap_opening + gap_extension
+        new_inserts[0] = new_scores[0] + gap_opening + gap_extension
 
         for j in range(1, seq2_len + 1):
             substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
-            delete = max(old_scores[j] + gap_opening, old_gaps1[j] + gap_extension)
-            insert = max(new_scores[j - 1] + gap_opening, new_gaps2[j - 1] + gap_extension)
+            delete = max(old_scores[j] + gap_opening, old_deletes[j] + gap_extension)
+            insert = max(new_scores[j - 1] + gap_opening, new_inserts[j - 1] + gap_extension)
             replace = old_scores[j - 1] + substitution
             score = max(replace, delete, insert)
             new_scores[j] = score
-            new_gaps1[j] = delete
-            new_gaps2[j] = insert
+            new_deletes[j] = delete
+            new_inserts[j] = insert
 
         # Swap rows
         old_scores, new_scores = new_scores, old_scores
-        old_gaps1, new_gaps1 = new_gaps1, old_gaps1
-        old_gaps2, new_gaps2 = new_gaps2, old_gaps2
+        old_deletes, new_deletes = new_deletes, old_deletes
+        old_inserts, new_inserts = new_inserts, old_inserts
 
     return old_scores[-1]
 
@@ -580,14 +580,14 @@ def _smith_waterman_gotoh_kernel(
     Basis:
     - scores[i, 0] = gap_opening + (i - 1) * gap_extension
     - scores[0, j] = gap_opening + (j - 1) * gap_extension
-    - gaps1[i, 0] = gap_opening + (i - 1) * gap_extension
-    - gaps2[0, j] = gap_opening + (j - 1) * gap_extension
+    - deletes[i, 0] = gap_opening + (i - 1) * gap_extension
+    - inserts[0, j] = gap_opening + (j - 1) * gap_extension
 
     Recurrence:
-    - gaps1[i, j] = max(scores[i - 1, j] + gap_opening, gaps1[i - 1, j] + gap_extension)
-    - gaps2[i, j] = max(scores[i, j - 1] + gap_opening, gaps2[i, j - 1] + gap_extension)
+    - deletes[i, j] = max(scores[i - 1, j] + gap_opening, deletes[i - 1, j] + gap_extension)
+    - inserts[i, j] = max(scores[i, j - 1] + gap_opening, inserts[i, j - 1] + gap_extension)
     - match = scores[i - 1, j - 1] + substitution_matrix[(seq1[i - 1], seq2[j - 1])]
-    - scores[i, j] = max(match, gaps1[i, j], gaps2[i, j], 0)
+    - scores[i, j] = max(match, deletes[i, j], inserts[i, j], 0)
     """
     seq1_len = len(seq1)
     seq2_len = len(seq2)
@@ -609,15 +609,15 @@ def _smith_waterman_gotoh_kernel(
     #
     # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
     scores = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps1 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
-    gaps2 = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    deletes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
+    inserts = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.int32)
     changes = np.empty((seq1_len + 1, seq2_len + 1), dtype=np.uint8)
 
     # Initialize the scoring matrix, following the suggestions in the paper,
     # so that the values in header (left or top) "gaps" are always smaller than those
     # in the "scores", and they are not considered as starting points in each iteration.
     scores[0, :] = 0
-    gaps1[0, :] = gap_opening + gap_extension
+    deletes[0, :] = gap_opening + gap_extension
     changes[0, :] = INSERT
 
     # Unlike Needleman-Wunsch, we also track the position of the maximum score.
@@ -627,24 +627,24 @@ def _smith_waterman_gotoh_kernel(
     # Fill the scoring matrix
     for i in range(1, seq1_len + 1):
         scores[i, 0] = 0
-        gaps2[i, 0] = gap_opening + gap_extension
+        inserts[i, 0] = gap_opening + gap_extension
         changes[i, 0] = DELETE
 
         for j in range(1, seq2_len + 1):
             substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
             delete = max(
                 scores[i - 1, j] + gap_opening,
-                gaps1[i - 1, j] + gap_extension,
+                deletes[i - 1, j] + gap_extension,
             )
             insert = max(
                 scores[i, j - 1] + gap_opening,
-                gaps2[i, j - 1] + gap_extension,
+                inserts[i, j - 1] + gap_extension,
             )
             replace = scores[i - 1, j - 1] + substitution
             score = max(replace, delete, insert, 0)
             scores[i, j] = score
-            gaps1[i, j] = delete
-            gaps2[i, j] = insert
+            deletes[i, j] = delete
+            inserts[i, j] = insert
 
             # Track changes
             if score == replace:
@@ -716,6 +716,131 @@ def smith_waterman_gotoh_alignment(
         lambda i, j: i > 0 and j > 0 and scores[i, j] > 0,
     )
     return align1, align2, int(scores[prefix1, prefix2])
+
+
+@nb.jit(nopython=True)
+def smith_waterman_gotoh_score_kernel(
+    seq1: np.ndarray,
+    seq2: np.ndarray,
+    substitution_matrix: np.ndarray,
+    gap_opening: int,
+    gap_extension: int,
+) -> int:
+    """
+    Computes the Smith-Waterman alignment score using Gotoh's affine gap penalty extensions.
+    Uses only two rows per matrix to reduce memory usage.
+
+    Parameters:
+    seq1 (np.ndarray): The first sequence to be aligned.
+    seq2 (np.ndarray): The second sequence to be aligned.
+    substitution_matrix (np.ndarray): The substitution matrix for scoring matches/mismatches.
+    gap_opening (int): The penalty for opening a gap.
+    gap_extension (int): The penalty for extending a gap.
+
+    Returns:
+    int: The highest alignment score.
+    """
+    seq1_len = len(seq1)
+    seq2_len = len(seq2)
+
+    # Let's use `np.empty` instead of `np.zeros` to avoid the initialization step.
+    old_scores = np.empty(seq2_len + 1, dtype=np.int32)
+    new_scores = np.empty(seq2_len + 1, dtype=np.int32)
+    old_deletes = np.empty(seq2_len + 1, dtype=np.int32)
+    new_deletes = np.empty(seq2_len + 1, dtype=np.int32)
+    old_inserts = np.empty(seq2_len + 1, dtype=np.int32)
+    new_inserts = np.empty(seq2_len + 1, dtype=np.int32)
+
+    # Initialize the scoring matrix, following the suggestions in the paper,
+    # so that the values in header (left or top) "gaps" are always smaller than those
+    # in the "scores", and they are not considered as starting points in each iteration.
+    old_scores[0] = 0
+    for j in range(1, seq2_len + 1):
+        old_scores[j] = 0
+        old_deletes[j] = gap_opening + gap_extension
+
+    max_score = 0
+
+    for i in range(1, seq1_len + 1):
+        new_scores[0] = 0
+        new_inserts[0] = gap_opening + gap_extension
+
+        for j in range(1, seq2_len + 1):
+            substitution = substitution_matrix[seq1[i - 1], seq2[j - 1]]
+            delete = max(old_scores[j] + gap_opening, old_deletes[j] + gap_extension)
+            insert = max(new_scores[j - 1] + gap_opening, new_inserts[j - 1] + gap_extension)
+            replace = old_scores[j - 1] + substitution
+            score = max(replace, delete, insert, 0)
+            new_scores[j] = score
+            new_deletes[j] = delete
+            new_inserts[j] = insert
+
+            if score > max_score:
+                max_score = score
+
+        # Swap rows
+        old_scores, new_scores = new_scores, old_scores
+        old_deletes, new_deletes = new_deletes, old_deletes
+        old_inserts, new_inserts = new_inserts, old_inserts
+
+    return max_score
+
+
+def smith_waterman_gotoh_score(
+    str1: str,
+    str2: str,
+    substitution_alphabet: Optional[str] = None,
+    substitution_matrix: Optional[np.ndarray] = None,
+    gap_opening: Optional[int] = None,
+    gap_extension: Optional[int] = None,
+    match: Optional[int] = None,
+    mismatch: Optional[int] = None,
+) -> int:
+    """
+    Measures the Smith-Waterman local alignment score using Gotoh's affine gap penalty extensions.
+
+    Parameters:
+    str1 (str): The first sequence to be aligned.
+    str2 (str): The second sequence to be aligned.
+    substitution_alphabet (Optional[str]): The optional alphabet used for the substitution matrix.
+    substitution_matrix (Optional[np.ndarray]): The optional substitution matrix for scoring matches/mismatches.
+    gap_opening (Optional[int]): The penalty for opening a gap.
+    gap_extension (Optional[int]): The penalty for extending a gap.
+    match (Optional[int]): The score for a match, to compose the substitution matrix.
+    mismatch (Optional[int]): The score for a mismatch, to compose the substitution matrix.
+
+    Returns:
+    int: The highest alignment score.
+
+    Example usage:
+    >>> from affine_gaps import smith_waterman_gotoh_score
+    >>> str1 = "GATTACA"
+    >>> str2 = "GCATGCU"
+    >>> score = smith_waterman_gotoh_score(str1, str2)
+    >>> print("Score:", score)
+    """
+
+    substitution_alphabet, substitution_matrix, gap_opening, gap_extension = _validate_gotoh_arguments(
+        substitution_alphabet=substitution_alphabet,
+        substitution_matrix=substitution_matrix,
+        gap_opening=gap_opening,
+        gap_extension=gap_extension,
+        match=match,
+        mismatch=mismatch,
+    )
+
+    seq1 = _translate_sequence(str1, substitution_alphabet)
+    seq2 = _translate_sequence(str2, substitution_alphabet)
+
+    score = smith_waterman_gotoh_score_kernel(
+        seq1,
+        seq2,
+        substitution_matrix=substitution_matrix,
+        gap_opening=gap_opening,
+        gap_extension=gap_extension,
+    )
+
+    return int(score)
 
 
 def colorize_alignment(align1: str, align2: str) -> Tuple[str, str]:

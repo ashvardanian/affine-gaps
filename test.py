@@ -14,6 +14,7 @@ from affine_gaps import (
     needleman_wunsch_gotoh_alignment,
     needleman_wunsch_gotoh_score,
     smith_waterman_gotoh_alignment,
+    smith_waterman_gotoh_score,
     levenshtein_alignment,
     colorize_alignment,
     default_proteins_alphabet,
@@ -170,7 +171,7 @@ alignments for sequences of varying lengths within a specified alphabet.
 @pytest.mark.repeat(30)
 @pytest.mark.parametrize("min_length", [3, 7])
 @pytest.mark.parametrize("max_length", [7, 15])
-def test_against_levenshtein(min_length, max_length):
+def test_against_levenshtein(min_length: int, max_length: int):
 
     alphabet = "ACGT"
     str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
@@ -210,6 +211,66 @@ def test_against_levenshtein(min_length, max_length):
     Needleman-Wunsch scored {nw_score}:
         {nw1}
         {nw2}
+    """
+
+
+"""
+Test that alignment and (just) scoring functions return the same scores for global and local alignments.
+
+Ensures that Needleman-Wunsch-Gotoh and Smith-Waterman-Gotoh alignment functions return the same scores
+as their scoring-only counterparts for sequences of varying lengths within a specified alphabet.
+"""
+
+
+@pytest.mark.repeat(30)
+@pytest.mark.parametrize("min_length", [3, 7])
+@pytest.mark.parametrize("max_length", [7, 15])
+@pytest.mark.parametrize("match_score", [1, 2, 3])
+@pytest.mark.parametrize("mismatch_score", [-4, -2])
+@pytest.mark.parametrize("gap_opening", [-5, -1])
+@pytest.mark.parametrize("mode", ["global", "local"])
+def test_scoring_vs_alignment(
+    min_length: int,
+    max_length: int,
+    match_score: int,
+    mismatch_score: int,
+    gap_opening: int,
+    mode: str,
+):
+
+    alphabet = "ACGT"
+    str1 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+    str2 = "".join(choice(alphabet) for _ in range(randint(min_length, max_length)))
+
+    # A subprocess may take a while to evaluate
+    scoring = needleman_wunsch_gotoh_score if mode == "global" else smith_waterman_gotoh_score
+    alignment = needleman_wunsch_gotoh_alignment if mode == "global" else smith_waterman_gotoh_alignment
+    aligned1, aligned2, aligned_score = alignment(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=gap_opening,
+        gap_extension=-1,
+        match=match_score,
+        mismatch=mismatch_score,
+    )
+    only_score = scoring(
+        str1,
+        str2,
+        substitution_alphabet=alphabet,
+        gap_opening=gap_opening,
+        gap_extension=-1,
+        match=match_score,
+        mismatch=mismatch_score,
+    )
+
+    colored1, colored2 = colorize_alignment(aligned1, aligned2)
+    assert (
+        aligned_score == only_score
+    ), f"""
+    Alignment ({aligned_score}) and pure scoring ({only_score}) functions must return identical results for:
+        {colored1}
+        {colored2}
     """
 
 
